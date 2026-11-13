@@ -1,5 +1,6 @@
 # 🎲 Kids Board Game Explorer & Recommender
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](YOUR_STREAMLIT_APP_URL)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/KrasheninnikovaOlga/kids-board-games-recommender/blob/main/kids_board_games_recommender.ipynb)
 
 **Which board games are actually worth it for kids, and what should we play next?**
@@ -17,13 +18,24 @@ recommender that suggests games for a child's age, the number of players, and th
 - **Evaluation against expert picks**: winners and nominees of the *Kinderspiel des Jahres* (Children's Game of the Year, 1989–2021) are used to test the recommender. Given 3 award games a family liked, how high does it rank a hidden award game, compared with random, most-popular and highest-rated baselines? (hit@10, hit@50, median rank)
 - **Interactive widgets** to try your own combinations
 
-## How to run
+## Live app
+
+**[Try the app](YOUR_STREAMLIT_APP_URL)**: pick your kid's age, the number of players and the time you have, or list the games your family loves, and get recommendations with explanations, award badges and BoardGameGeek links.
+
+The app (`app.py`, built with Streamlit) and the notebook share the same logic (`recsys.py`).
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Notebook
 
 Click **Open in Colab** above, then **Runtime → Run all**. No setup or API keys are needed: the data loads directly from GitHub.
 
 ## Tech
 
-Python · pandas · scikit-learn · SciPy · matplotlib · ipywidgets · Google Colab
+Python · Streamlit · pandas · scikit-learn · SciPy · matplotlib · ipywidgets · Google Colab
 
 ## Data
 
