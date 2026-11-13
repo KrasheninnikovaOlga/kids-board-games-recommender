@@ -20,7 +20,7 @@ DATA_URL = "https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/d
 MIN_RATINGS = 200
 FEATURE_WEIGHTS = {"mechanics": 1.0, "categories": 1.0, "text": 0.7, "numeric": 0.5}
 # bump when prepare/build_features change, so stale precomputed artifacts are ignored
-ARTIFACT_VERSION = 1
+ARTIFACT_VERSION = 2
 
 # Kinderspiel des Jahres (Children's Game of the Year), 1989–2021.
 # Source: https://en.wikipedia.org/wiki/Spiel_des_Jahres  (BGG snapshot is from Jan 2022)
@@ -195,6 +195,10 @@ def prepare(raw, min_ratings=MIN_RATINGS):
     for year, status, titles in KDJ:
         keys = {norm_title(t) for t in titles}
         hit = raw_norm[raw_norm["n"].isin(keys)]
+        # generic titles ("Treasure Hunt", "Robots") exist many times on BGG: the game must have been
+        # published shortly before the award (unknown year = 0/NaN is accepted)
+        yp = hit["yearpublished"]
+        hit = hit[yp.between(year - 4, year) | yp.isna() | (yp == 0)]
         bgg_id = hit.loc[hit["users_rated"].idxmax(), "id"] if len(hit) else None
         rows.append({"year": year, "status": status, "title": titles[0], "id": bgg_id})
     kdj = pd.DataFrame(rows)

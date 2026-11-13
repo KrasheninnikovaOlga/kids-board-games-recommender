@@ -203,7 +203,8 @@ elif page == "similar":
     st.subheader("We loved these games. What's similar?")
     order = games.sort_values("users_rated", ascending=False).index.tolist()
     st.multiselect("Games your family loves", order, key="liked",
-                   format_func=lambda i: f"{games.at[i, 'name']} ({int(games.at[i, 'yearpublished'])})",
+                   format_func=lambda i: games.at[i, "name"] + (
+                       f" ({int(games.at[i, 'yearpublished'])})" if games.at[i, "yearpublished"] > 0 else ""),
                    placeholder="Start typing a game name…")
     c1, c2 = st.columns([2, 3])
     c1.slider("Suitable from age", 3, 14, key="max_age")
