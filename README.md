@@ -14,6 +14,7 @@ recommender that suggests games for a child's age, the number of players, and th
 - **Clustering**: TF-IDF + TruncatedSVD + K-Means groups kids' games into "game types", with a t-SNE map
 - **Recommender #1**: *"We loved Dixit and Codenames, what's similar?"* (cosine similarity on mechanics, categories, description text and numeric features)
 - **Recommender #2**: *"My kid is 7, we're 3 players, we have 30 minutes"*, with hard filters plus a preference score, and every pick explains why it was chosen
+- **Evaluation against expert picks**: winners and nominees of the *Kinderspiel des Jahres* (Children's Game of the Year, 1989–2021) are used to test the recommender. Given 3 award games a family liked, how high does it rank a hidden award game, compared with random, most-popular and highest-rated baselines? (hit@10, hit@50, median rank)
 - **Interactive widgets** to try your own combinations
 
 ## How to run
@@ -28,6 +29,7 @@ Python · pandas · scikit-learn · SciPy · matplotlib · ipywidgets · Google 
 
 [TidyTuesday 2022-01-25: Board Games](https://github.com/rfordatascience/tidytuesday/tree/main/data/2022/2022-01-25),
 which is BoardGameGeek data collected via Kaggle (snapshot from January 2022).
+Award winners and nominees: [Wikipedia — Spiel des Jahres](https://en.wikipedia.org/wiki/Spiel_des_Jahres).
 
 ## Limitations & next steps
 
