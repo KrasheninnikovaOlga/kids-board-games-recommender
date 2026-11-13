@@ -1,8 +1,11 @@
 """Kids Board Game Recommender: Streamlit app.
 
 Run locally:  streamlit run app.py
+Uses precomputed ./artifacts/ when present (built by build_artifacts.py / GitHub Actions),
+otherwise downloads the data and computes everything on startup.
 """
 import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -11,6 +14,7 @@ import streamlit as st
 import recsys
 
 REPO_URL = "https://github.com/KrasheninnikovaOlga/kids-board-games-recommender"
+ARTIFACTS = Path(__file__).parent / "artifacts"
 ACCENT, GREY, ACCENT2 = "#4C6EF5", "#ADB5BD", "#F59F00"
 plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False, "axes.grid": True,
                      "grid.alpha": 0.25, "axes.titleweight": "bold"})
@@ -19,33 +23,104 @@ st.set_page_config(page_title="Kids Board Game Recommender", page_icon="🎲", l
 
 
 # ---------------------------------------------------------------- data (cached)
-@st.cache_data(show_spinner="Loading ~20,000 board games from BoardGameGeek…")
-def get_data():
+@st.cache_resource(show_spinner="Loading ~20,000 board games…")
+def get_model():
+    """Returns (games, kdj, X, feature_names, feature_blocks, evaluation)."""
+    loaded = recsys.load_artifacts(ARTIFACTS)
+    if loaded is not None:
+        return loaded
     base = os.environ.get("BGG_DATA_BASE", recsys.DATA_URL)  # override for local testing
-    return recsys.prepare(recsys.load_raw(base))
+    games, kdj = recsys.prepare(recsys.load_raw(base))
+    X, names, blocks = recsys.build_features(games)
+    return games, kdj, X, names, blocks, recsys.evaluate(games, X)
 
 
-@st.cache_resource(show_spinner="Building game features (mechanics, themes, descriptions)…")
-def get_features():
-    games, _ = get_data()
-    return recsys.build_features(games)
+games, kdj, X, feat_names, feat_blocks, evaluation = get_model()
+ids_to_idx = pd.Series(games.index, index=games["id"])
+
+PAGES = {"find": "🎯 Find a game", "similar": "🔁 More like this",
+         "explore": "📊 Explore", "eval": "✅ How good is it?"}
+KID_TAGS = games[games["minage"] <= 10]["tags"].explode().value_counts().head(40).index.tolist()
 
 
-@st.cache_resource(show_spinner="Evaluating the recommender against award winners…")
-def get_evaluation():
-    games, _ = get_data()
-    return recsys.evaluate(games, get_features())
+# ---------------------------------------------------------------- state <-> URL (shareable links)
+def _int(qp, key, default, lo, hi):
+    try:
+        return min(max(int(qp.get(key, default)), lo), hi)
+    except (TypeError, ValueError):
+        return default
 
 
-games, kdj = get_data()
-X = get_features()
+def _list(qp, key):
+    v = qp.get(key, "")
+    return [x for x in str(v).split(",") if x] if v else []
 
 
-def show_games(df, extra=()):
-    """Render a results table with thumbnails and BGG links."""
-    if df.empty:
-        st.info("No games match these filters. Try more time or a different number of players.")
-        return
+ss = st.session_state
+if "initialized" not in ss:                      # first visit: read settings from the URL
+    qp = st.query_params
+    ss.page = PAGES.get(qp.get("page", "find"), PAGES["find"])
+    ss.age = _int(qp, "age", 7, 3, 14)
+    ss.players = _int(qp, "players", 3, 1, 8)
+    ss.max_time = _int(qp, "time", 30, 10, 120) // 5 * 5
+    likes = [t for t in _list(qp, "likes") if t in KID_TAGS]
+    ss.likes = likes if "likes" in qp else [t for t in ["Cooperative Game", "Animals"] if t in KID_TAGS]
+    liked_ids = [int(x) for x in _list(qp, "games") if x.isdigit() and int(x) in ids_to_idx.index]
+    if liked_ids:
+        ss.liked = [int(ids_to_idx[i]) for i in liked_ids]
+    else:
+        popular = games.sort_values("users_rated", ascending=False)
+        ss.liked = [int(i) for i in popular.index[popular["name"].isin(["Ticket to Ride", "Dixit"])][:2]]
+    ss.max_age = _int(qp, "max_age", 8, 3, 14)
+    ss.versions = qp.get("versions", "0") == "1"
+    ss.n = _int(qp, "n", 12, 4, 24) // 4 * 4
+    ss.view = "Table" if qp.get("view") == "table" else "Cards"
+    ss.initialized = True
+
+WIDGET_KEYS = ["page", "age", "players", "max_time", "likes", "liked", "max_age", "versions", "n", "view"]
+for k in WIDGET_KEYS:          # keep values when a widget is not rendered on the current page
+    ss[k] = ss[k]
+
+
+def sync_url(page_key):
+    qp = {"page": page_key}
+    if page_key == "find":
+        qp.update(age=ss.age, players=ss.players, time=ss.max_time, likes=",".join(ss.likes))
+    elif page_key == "similar":
+        qp.update(games=",".join(str(int(games.at[i, "id"])) for i in ss.liked),
+                  max_age=ss.max_age, versions=int(ss.versions))
+    if page_key in ("find", "similar"):
+        qp.update(n=ss.n, view=ss.view.lower())
+    st.query_params.from_dict({k: str(v) for k, v in qp.items()})
+
+
+# ---------------------------------------------------------------- result rendering
+def _meta_line(r):
+    return (f"👶 {int(r.minage)}+ · 👥 {int(r.minplayers)}–{int(r.maxplayers)} · "
+            f"⏱ {int(r.playingtime)} min · ⭐ {r.bayes_average:.2f}")
+
+
+def show_cards(df, why_label="Why"):
+    per_row = 4
+    rows = list(df.itertuples())
+    for start in range(0, len(rows), per_row):
+        cols = st.columns(per_row)
+        for col, r in zip(cols, rows[start:start + per_row]):
+            with col.container(border=True):
+                if isinstance(r.thumbnail, str) and r.thumbnail.startswith("http"):
+                    st.image(r.thumbnail, width=150)
+                year = f" ({int(r.yearpublished)})" if pd.notna(r.yearpublished) else ""
+                st.markdown(f"**{r.name}**{year}")
+                st.caption(_meta_line(r))
+                if r.award:
+                    st.markdown(f"**{r.award}**")
+                why = getattr(r, "why", "")
+                if why:
+                    st.caption(f"{why_label}: {why}")
+                st.link_button("BoardGameGeek ↗", r.bgg_url)
+
+
+def show_table(df, why_label="Why"):
     out = pd.DataFrame({
         "thumbnail": df["thumbnail"],
         "Game": df["name"],
@@ -54,10 +129,11 @@ def show_games(df, extra=()):
         "Players": df["minplayers"].astype(int).astype(str) + "–" + df["maxplayers"].astype(int).astype(str),
         "Minutes": df["playingtime"].astype(int),
         "BGG rating": df["bayes_average"].round(2),
-        **{label: df[col] for label, col in extra},
         "Award": df["award"],
         "BGG": df["bgg_url"],
     })
+    if "why" in df:
+        out.insert(7, why_label, df["why"].to_numpy())
     st.dataframe(
         out, hide_index=True, width="stretch",
         column_config={
@@ -69,7 +145,21 @@ def show_games(df, extra=()):
     )
 
 
-# ---------------------------------------------------------------- header & sidebar
+def show_results(df, why_label="Why", force_table=False):
+    if df.empty:
+        st.info("No games match these settings. Try more time or a different number of players.")
+        return
+    (show_table if force_table or ss.view == "Table" else show_cards)(df, why_label)
+
+
+def result_controls():
+    c1, c2, c3 = st.columns([2, 2, 3])
+    c1.slider("How many suggestions", 4, 24, step=4, key="n")
+    c2.radio("View", ["Cards", "Table"], horizontal=True, key="view")
+    c3.caption("🔗 Your settings are saved in the address bar. Copy the link to share these results.")
+
+
+# ---------------------------------------------------------------- header, sidebar, navigation
 st.title("🎲 Kids Board Game Recommender")
 st.caption(f"{len(games):,} board games from BoardGameGeek · content-based ML recommendations · "
            "checked against *Kinderspiel des Jahres* (Children's Game of the Year) picks")
@@ -80,8 +170,9 @@ with st.sidebar:
         "Find board games for kids by age, number of players and time, or get games similar to "
         "the ones your family already loves.\n\n"
         "**How it works:** each game is a vector of its mechanics, categories, description "
-        "(TF-IDF) and basic stats; recommendations use cosine similarity blended with the BGG rating. "
-        "Versions of the same game (*Catan Junior*, *Ticket to Ride: Europe*) are filtered out.\n\n"
+        "(TF-IDF) and basic stats. Recommendations use cosine similarity blended with the BGG rating, "
+        "and each pick shows the features that made it similar. Versions of the same game "
+        "(*Catan Junior*, *Ticket to Ride: Europe*) are filtered out.\n\n"
         "**Data:** BoardGameGeek via "
         "[TidyTuesday](https://github.com/rfordatascience/tidytuesday/tree/main/data/2022/2022-01-25) "
         "(snapshot Jan 2022, games with 200+ ratings) · award list from "
@@ -89,46 +180,44 @@ with st.sidebar:
         f"**Code & notebook:** [GitHub]({REPO_URL})"
     )
 
-tab_find, tab_similar, tab_explore, tab_eval = st.tabs(
-    ["🎯 Find a game", "🔁 More like this", "📊 Explore", "✅ How good is it?"])
+page_label = st.radio("Section", list(PAGES.values()), horizontal=True, key="page",
+                      label_visibility="collapsed")
+page = next(k for k, v in PAGES.items() if v == page_label)
 
-# ---------------------------------------------------------------- tab 1: find a game
-with tab_find:
+# ---------------------------------------------------------------- find a game
+if page == "find":
     st.subheader("My kid is… we are… we have…")
     c1, c2, c3 = st.columns(3)
-    age = c1.slider("Kid's age", 3, 14, 7)
-    players = c2.slider("Players", 1, 8, 3)
-    max_time = c3.slider("Max minutes", 10, 120, 30, step=5)
-    kid_tags = games[games["minage"] <= 10]["tags"].explode().value_counts().head(40).index.tolist()
-    default_likes = [t for t in ["Cooperative Game", "Animals"] if t in kid_tags]
-    likes = st.multiselect("We like… (mechanics & themes)", kid_tags, default=default_likes)
-    n = st.slider("How many suggestions", 5, 25, 10, key="n_find")
-    res = recsys.recommend(games, age, players, max_time, likes=likes, n=n)
-    show_games(res, extra=[("Why", "why")] if not res.empty else ())
+    c1.slider("Kid's age", 3, 14, key="age")
+    c2.slider("Players", 1, 8, key="players")
+    c3.slider("Max minutes", 10, 120, step=5, key="max_time")
+    st.multiselect("We like… (mechanics & themes)", KID_TAGS, key="likes")
+    result_controls()
+    res = recsys.recommend(games, ss.age, ss.players, ss.max_time, likes=ss.likes, n=ss.n)
+    show_results(res, why_label="Matches")
 
-# ---------------------------------------------------------------- tab 2: more like this
-with tab_similar:
+# ---------------------------------------------------------------- more like this
+elif page == "similar":
     st.subheader("We loved these games. What's similar?")
     order = games.sort_values("users_rated", ascending=False).index.tolist()
-    label = lambda i: f"{games.at[i, 'name']} ({int(games.at[i, 'yearpublished'])})"
-    defaults = [i for i in order if games.at[i, "name"] in ("Ticket to Ride", "Dixit")][:2]
-    liked = st.multiselect("Games your family loves", order, default=defaults, format_func=label,
-                           placeholder="Start typing a game name…")
-    c1, c2, c3 = st.columns([2, 2, 3])
-    max_age = c1.slider("Suitable from age", 3, 14, 8)
-    n2 = c2.slider("How many suggestions", 5, 25, 10, key="n_similar")
-    allow_series = c3.checkbox("Include versions of the same game", value=False,
-                               help="e.g. Ticket to Ride: Europe for Ticket to Ride")
-    if liked:
-        res2 = recsys.similar_games(games, X, liked, max_age=max_age, n=n2, allow_same_series=allow_series)
-        show_games(res2, extra=[("Similarity", "similarity")])
+    st.multiselect("Games your family loves", order, key="liked",
+                   format_func=lambda i: f"{games.at[i, 'name']} ({int(games.at[i, 'yearpublished'])})",
+                   placeholder="Start typing a game name…")
+    c1, c2 = st.columns([2, 3])
+    c1.slider("Suitable from age", 3, 14, key="max_age")
+    c2.checkbox("Include versions of the same game", key="versions",
+                help="e.g. Ticket to Ride: Europe for Ticket to Ride")
+    result_controls()
+    if ss.liked:
+        res = recsys.similar_games(games, X, ss.liked, max_age=ss.max_age, n=ss.n,
+                                   allow_same_series=ss.versions, names=feat_names, blocks=feat_blocks)
+        show_results(res, why_label="In common")
     else:
         st.info("Pick at least one game you like.")
 
-# ---------------------------------------------------------------- tab 3: explore
-with tab_explore:
+# ---------------------------------------------------------------- explore
+elif page == "explore":
     c1, c2 = st.columns(2)
-
     with c1:
         st.markdown("**Games and median rating by recommended minimum age**")
         by_age = games.groupby("age_group", observed=True).agg(
@@ -141,7 +230,6 @@ with tab_explore:
         ax2.set_ylabel("Median user rating", color=ACCENT2)
         ax2.grid(False)
         fig.tight_layout(); st.pyplot(fig); plt.close(fig)
-
     with c2:
         st.markdown("**Share of cooperative games: kids vs older audiences**")
         coop = recsys.coop_trend(games)
@@ -163,10 +251,10 @@ with tab_explore:
     st.markdown("**Top-rated games by age group**")
     group = st.segmented_control("Minimum age", ["2–5", "6–7", "8–9", "10–11", "12+"], default="6–7")
     if group:
-        show_games(games[games["age_group"] == group].nlargest(10, "bayes_average"))
+        show_results(games[games["age_group"] == group].nlargest(8, "bayes_average"))
 
-# ---------------------------------------------------------------- tab 4: evaluation
-with tab_eval:
+# ---------------------------------------------------------------- evaluation
+else:
     st.subheader("Does the model agree with the experts?")
     st.markdown(
         "The jury of the German *Kinderspiel des Jahres* award plays games with children and picks the best "
@@ -175,11 +263,10 @@ with tab_eval:
         "2. **Hide another award game** and see how high it ranks among all kids' games (age ≤ 8).\n"
         "3. Repeat for every award game and compare with baselines that ignore what the family liked."
     )
-    results, pool, award_pos = get_evaluation()
-    found = int(kdj["id"].notna().sum())
+    results, pool, award_pos = evaluation
     m1, m2, m3 = st.columns(3)
     m1.metric("Award games 1989–2021", len(kdj))
-    m2.metric("Found on BGG by title", found)
+    m2.metric("Found on BGG by title", int(kdj["id"].notna().sum()))
     m3.metric("In the test pool (age ≤ 8, 200+ ratings)", len(award_pos))
 
     if results is None:
@@ -204,8 +291,11 @@ with tab_eval:
                        "Median rank: position as % of the list (lower is better).")
 
     with st.expander("Award games in the data"):
-        show_games(games.loc[award_pos].sort_values("bayes_average", ascending=False))
+        show_results(games.loc[list(award_pos)].sort_values("bayes_average", ascending=False),
+                     force_table=True)
     missing = kdj.loc[kdj["id"].isna(), "title"].tolist()
     if missing:
         with st.expander(f"Not found on BGG by title ({len(missing)})"):
             st.write(", ".join(missing))
+
+sync_url(page)

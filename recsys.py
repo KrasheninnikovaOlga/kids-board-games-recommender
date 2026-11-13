@@ -3,9 +3,12 @@
 Shared by the Streamlit app (app.py). Same logic as the Colab notebook.
 """
 import ast
+import gzip
 import html
+import json
 import re
 import unicodedata
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -16,6 +19,8 @@ from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler, normalize
 DATA_URL = "https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2022/2022-01-25/"
 MIN_RATINGS = 200
 FEATURE_WEIGHTS = {"mechanics": 1.0, "categories": 1.0, "text": 0.7, "numeric": 0.5}
+# bump when prepare/build_features change, so stale precomputed artifacts are ignored
+ARTIFACT_VERSION = 1
 
 # Kinderspiel des Jahres (Children's Game of the Year), 1989–2021.
 # Source: https://en.wikipedia.org/wiki/Spiel_des_Jahres  (BGG snapshot is from Jan 2022)
@@ -203,8 +208,11 @@ def prepare(raw, min_ratings=MIN_RATINGS):
 
 # ---------------------------------------------------------------- features
 def build_features(games, w=FEATURE_WEIGHTS):
-    X_mech = MultiLabelBinarizer(sparse_output=True).fit_transform(games["mechanics"]).astype(float)
-    X_cat = MultiLabelBinarizer(sparse_output=True).fit_transform(games["categories"]).astype(float)
+    """Returns (X, feature_names, feature_blocks). Rows of X align with rows of `games`."""
+    mlb_mech = MultiLabelBinarizer(sparse_output=True)
+    mlb_cat = MultiLabelBinarizer(sparse_output=True)
+    X_mech = mlb_mech.fit_transform(games["mechanics"]).astype(float)
+    X_cat = mlb_cat.fit_transform(games["categories"]).astype(float)
     tfidf = TfidfVectorizer(max_features=6000, stop_words="english", min_df=5,
                             ngram_range=(1, 2), sublinear_tf=True)
     X_text = tfidf.fit_transform(games["description_clean"])
@@ -216,7 +224,32 @@ def build_features(games, w=FEATURE_WEIGHTS):
         normalize(X_text) * w["text"],
         X_num * w["numeric"],
     ]).tocsr()
-    return normalize(X)
+    names = (list(mlb_mech.classes_) + list(mlb_cat.classes_)
+             + list(tfidf.get_feature_names_out()) + list(num.columns))
+    blocks = (["mechanic"] * X_mech.shape[1] + ["category"] * X_cat.shape[1]
+              + ["text"] * X_text.shape[1] + ["numeric"] * X_num.shape[1])
+    return normalize(X).tocsr(), names, np.array(blocks)
+
+
+def explain(X, names, blocks, rows, profile, k=4):
+    """Why is each recommended game similar? Cosine similarity = sum of feature-wise products,
+    so the features with the largest product (game value x profile value) are the reasons."""
+    p = np.asarray(profile.todense()).ravel() if sparse.issparse(profile) else np.ravel(profile)
+    C = sparse.csr_matrix(X[rows].multiply(p))
+    out = []
+    for r in range(C.shape[0]):
+        row = C.getrow(r)
+        keep = sorted(((v, i) for v, i in zip(row.data, row.indices)
+                       if v > 0 and blocks[i] != "numeric"), reverse=True)
+        labels = []
+        for _, i in keep:   # a tag can be both a mechanic and a category -> show it once
+            lab = f"“{names[i]}”" if blocks[i] == "text" else names[i]
+            if lab not in labels:
+                labels.append(lab)
+            if len(labels) == k:
+                break
+        out.append(" · ".join(labels))
+    return out
 
 
 # ---------------------------------------------------------------- recommenders
@@ -240,8 +273,10 @@ def diversify(ranked, n, exclude_series=()):
     return ranked.loc[picked]
 
 
-def similar_games(games, X, liked_idx, max_age=None, n=10, rating_weight=0.3, allow_same_series=False):
-    """'We loved these games, what's similar?' liked_idx: row indices in `games`."""
+def similar_games(games, X, liked_idx, max_age=None, n=10, rating_weight=0.3, allow_same_series=False,
+                  names=None, blocks=None):
+    """'We loved these games, what's similar?' liked_idx: row indices in `games`.
+    Pass feature names/blocks to get a 'why' column explaining each pick."""
     idx = list(liked_idx)
     profile = normalize(sparse.csr_matrix(X[idx].mean(axis=0)))
     sim = (X @ profile.T).toarray().ravel()
@@ -251,12 +286,16 @@ def similar_games(games, X, liked_idx, max_age=None, n=10, rating_weight=0.3, al
     cand = cand.assign(score=(1 - rating_weight) * cand["similarity"] + rating_weight * cand["rating_norm"])
     ranked = cand.sort_values("score", ascending=False)
     if allow_same_series:
-        return ranked.head(n)
-    liked_names = set(games.loc[idx, "name"])
-    liked_impl = set().union(*games.loc[idx, "implementations"])
-    related = ranked["name"].isin(liked_impl) | ranked["implementations"].map(
-        lambda imp: bool(liked_names & set(imp)))
-    return diversify(ranked[~related], n, exclude_series=games.loc[idx, "series"])
+        top = ranked.head(n)
+    else:
+        liked_names = set(games.loc[idx, "name"])
+        liked_impl = set().union(*games.loc[idx, "implementations"])
+        related = ranked["name"].isin(liked_impl) | ranked["implementations"].map(
+            lambda imp: bool(liked_names & set(imp)))
+        top = diversify(ranked[~related], n, exclude_series=games.loc[idx, "series"])
+    if names is not None and len(top):
+        top = top.assign(why=explain(X, names, blocks, top.index.to_numpy(), profile))
+    return top
 
 
 def recommend(games, age, players, max_time, likes=(), n=10, rating_weight=0.4):
@@ -334,3 +373,60 @@ def evaluate(games, X, n_liked=3, n_draws=5, rating_weight=0.3, seed=42):
                     median_rank_pct=("pct", "median"))
                .sort_values("median_rank_pct"))
     return results, pool, award_pos
+
+
+# ---------------------------------------------------------------- precomputed artifacts
+APP_COLUMNS = ["id", "name", "yearpublished", "minage", "minplayers", "maxplayers", "playingtime",
+               "average", "bayes_average", "users_rated", "thumbnail", "bgg_url", "series",
+               "implementations", "mechanics", "categories", "tags", "rating_norm", "award"]
+
+
+def save_artifacts(out_dir, games, kdj, X, names, blocks, evaluation):
+    """Everything the app needs, so it starts in seconds instead of downloading & re-fitting."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    games[APP_COLUMNS].to_json(out / "games.jsonl.gz", orient="records", lines=True,
+                               force_ascii=False, compression="gzip")
+    sparse.save_npz(out / "features.npz", X, compressed=True)
+    results, pool, award_pos = evaluation
+    meta = {
+        "version": ARTIFACT_VERSION,
+        "n_games": len(games),
+        "feature_names": list(names),
+        "feature_blocks": list(map(str, blocks)),
+        "kdj": json.loads(kdj.to_json(orient="records")),
+        "evaluation": None if results is None else {
+            "results": json.loads(results.reset_index().to_json(orient="records")),
+            "pool_size": len(pool),
+            "award_pos": [int(i) for i in award_pos],
+        },
+    }
+    with gzip.open(out / "meta.json.gz", "wt", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+
+
+def load_artifacts(in_dir):
+    """Returns (games, kdj, X, names, blocks, evaluation) or None if missing / built by an older version."""
+    d = Path(in_dir)
+    if not all((d / f).exists() for f in ["games.jsonl.gz", "features.npz", "meta.json.gz"]):
+        return None
+    with gzip.open(d / "meta.json.gz", "rt", encoding="utf-8") as f:
+        meta = json.load(f)
+    if meta.get("version") != ARTIFACT_VERSION:
+        return None
+    games = pd.read_json(d / "games.jsonl.gz", orient="records", lines=True, compression="gzip")
+    games["award"] = games["award"].fillna("")
+    games["thumbnail"] = games["thumbnail"].where(games["thumbnail"].notna(), None)
+    games["age_group"] = pd.cut(games["minage"], bins=[0, 5, 7, 9, 11, 99],
+                                labels=["2–5", "6–7", "8–9", "10–11", "12+"])
+    X = sparse.load_npz(d / "features.npz").tocsr()
+    if X.shape[0] != len(games) or X.shape[0] != meta["n_games"]:
+        return None
+    kdj = pd.DataFrame(meta["kdj"])
+    ev = meta["evaluation"]
+    evaluation = (None, pd.Index([]), []) if ev is None else (
+        pd.DataFrame(ev["results"]).set_index("method"),
+        range(ev["pool_size"]),
+        ev["award_pos"],
+    )
+    return games, kdj, X, meta["feature_names"], np.array(meta["feature_blocks"]), evaluation

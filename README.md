@@ -20,9 +20,11 @@ recommender that suggests games for a child's age, the number of players, and th
 
 ## Live app
 
-**[Try the app](https://kids-board-games-recommender.streamlit.app/)**: pick your kid's age, the number of players and the time you have, or list the games your family loves, and get recommendations with explanations, award badges and BoardGameGeek links.
+**[Try the app](YOUR_STREAMLIT_APP_URL)**: pick your kid's age, the number of players and the time you have, or list the games your family loves, and get recommendations with explanations, award badges and BoardGameGeek links.
 
 The app (`app.py`, built with Streamlit) and the notebook share the same logic (`recsys.py`).
+Data and features are precomputed by `build_artifacts.py`, which a GitHub Actions workflow runs automatically on every
+change to the model code, so the app starts in seconds. Any result can be shared: settings live in the page URL.
 
 ```bash
 pip install -r requirements.txt
