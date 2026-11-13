@@ -107,11 +107,13 @@ def show_cards(df, why_label="Why"):
         cols = st.columns(per_row)
         for col, r in zip(cols, rows[start:start + per_row]):
             with col.container(border=True):
+                # thumbnails in the data are small: show them at native size, never upscaled
+                c_img, c_txt = st.columns([1, 3])
                 if isinstance(r.thumbnail, str) and r.thumbnail.startswith("http"):
-                    st.image(r.thumbnail, width=150)
+                    c_img.image(r.thumbnail, width="content")
                 year = f" ({int(r.yearpublished)})" if pd.notna(r.yearpublished) else ""
-                st.markdown(f"**{r.name}**{year}")
-                st.caption(_meta_line(r))
+                c_txt.markdown(f"**{r.name}**{year}")
+                c_txt.caption(_meta_line(r))
                 if r.award:
                     st.markdown(f"**{r.award}**")
                 why = getattr(r, "why", "")
